@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+build/
+.venv/
+*.parts/
+*.mp3
+.DS_Store
+dist/
+.ruff_cache/
+.idea
