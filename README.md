@@ -47,6 +47,14 @@ mtsdump -o ~/Downloads 22222222222 33333333333
 The name is `<date> <name>.mp3`, taken from the meeting title. `--name` takes `{date}`, `{name}` and `{id}`. An existing
 file is neither overwritten nor rebuilt.
 
+A call recording saved as a video in VK Messenger is downloaded the same way, by its `vkvideo.ru` link:
+
+```sh
+mtsdump https://vkvideo.ru/video123456789_987654321?list=ln-0123456789abcdef
+```
+
+See [VK video links](#vk-video-links).
+
 A run against a private recording:
 
 ```
@@ -98,6 +106,25 @@ Either way the cookies go only to `mts-link.ru` and `webinar.ru` hosts, and they
 Two failures are common. `rejected the cookies` means the session is over, so open MTS Link in the browser again.
 `Chrome has no cookies for gw.mts-link.ru` means that profile has nothing for the domain at all: the session cookie is
 set on `.mts-link.ru` and covers the gateway host too, so logging in to MTS Link in that profile is enough.
+
+## VK video links
+
+A call recorded in VK Messenger sits in the chat as a private video. Open it in the browser once, copy the link of the
+form `https://vkvideo.ru/video<owner>_<id>` (the `?list=` part is the access key) and pass it to `mtsdump`:
+
+```sh
+mtsdump --cookies-from-browser chrome https://vkvideo.ru/video123456789_987654321?list=ln-0123456789abcdef
+```
+
+The video is open only to your VK account, so the same cookie options as for a private MTS recording apply: Chrome has
+to be logged in to vk.ru, or the `Cookie` header comes from `--cookie`. `mtsdump` exchanges the vk.ru session for a
+vkvideo.ru one, asks the VK API for the streams and takes the audio of the cheapest HLS rendition: the audio track is
+the same in every rendition, and the video track is dropped anyway. `--mp4` takes the audio from the full mp4 file
+instead. What is written is one plain mp3, mono, without loudness normalization, capped by the same limiter as the
+per-speaker tracks. `--list`, `--verify`, `--split-speakers` and `--keep` apply to MTS Link recordings only.
+
+[docs/vk-video-api.md](docs/vk-video-api.md) is what I found out about the VK side: the token exchange, the API and the
+quirks of the delivery hosts.
 
 ## Options
 
@@ -151,7 +178,9 @@ listed separately, and with `--split-speakers` no track is written for them.
 
 - macOS only
 - Cookies are read from Chrome. With any other browser, copy the header and use `--cookie`.
-- Only `/record-new/` links are parsed, older recording URLs are not.
+- Only `/record-new/` links are parsed, older recording URLs are not. VK is reached only through
+  `vkvideo.ru/video<owner>_<id>` links, other VK URL forms are not parsed.
+- VK recordings come out as audio only, one rendition, no `--verify` report.
 - A recording that was cut in the MTS Link editor is assembled whole: the cut parts come back and the timing stops
   matching the player after the first cut. `mtsdump` warns when it sees this.
 - A few streams in a large meeting have a playlist that cannot be joined into a single file (two initialization

@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import dataclasses
 import errno
 import functools
@@ -8,10 +9,10 @@ import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from mtsdump import __version__, api, download, ffmpeg, mix, naming, net, verify
+from mtsdump import __version__, api, download, ffmpeg, mix, naming, net, verify, vk
 from mtsdump.console import Console, ConsoleHandler
 from mtsdump.cookies import CookieError, chrome_cookie_header
-from mtsdump.links import RecordRef, parse_record_ref
+from mtsdump.links import RecordRef, VkVideoRef, parse_record_ref, parse_vk_video_ref
 from mtsdump.record import Record, RecordFormatError, Speaker, parse_record
 
 DEFAULT_JOBS = 6
@@ -29,6 +30,8 @@ RECORD_ERRORS = (
     net.HttpStatusError,
     net.NetworkError,
     OSError,
+    vk.AccessDenied,
+    vk.ApiError,
 )
 
 log = logging.getLogger("mtsdump")
@@ -45,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        refs = [parse_record_ref(value) for value in args.records]
+        refs = [_ref(value) for value in args.records]
         naming.check_template(args.name)
     except ValueError as error:
         parser.error(str(error))
@@ -63,8 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     try:
         for ref in refs:
+            process = _process_vk if isinstance(ref, VkVideoRef) else _process
             try:
-                _process(ref, args, cookie_for, console)
+                process(ref, args, cookie_for, console)
             except RECORD_ERRORS as error:
                 console.end_progress()
                 log.error("record %s: %s", ref.session_id, _describe(error))
@@ -74,6 +78,54 @@ def main(argv: list[str] | None = None) -> int:
         log.error("interrupted, downloaded parts stay in <id>.parts in the output folder for the next run")
         return 130
     return 1 if failures else 0
+
+
+def _ref(value: str) -> RecordRef | VkVideoRef:
+    try:
+        return parse_record_ref(value)
+    except ValueError:
+        pass
+    try:
+        return parse_vk_video_ref(value)
+    except ValueError:
+        raise ValueError(f"not a record link, a session id or a vkvideo.ru video link: {value!r}") from None
+
+
+def _process_vk(ref: VkVideoRef, args: argparse.Namespace, cookie_for: api.CookieSource, console: Console) -> None:
+    if args.list:
+        raise vk.ApiError("--list is not supported for VK links")
+    video = vk.fetch_video(ref, cookie_for)
+    log.info("%s: %s", video.session_id, video.title)
+    output_dir = os.path.expanduser(args.output)
+    os.makedirs(output_dir, exist_ok=True)
+    main_path = os.path.join(
+        output_dir, naming.filename_for(args.name, video.session_id, video.title, video.started_at)
+    )
+    if os.path.exists(main_path):
+        log.info("already saved: %s", main_path)
+        return
+    if args.mp4 and not video.mp4_url:
+        raise vk.ApiError(f"video {ref.session_id} has no mp4 file")
+    source = video.mp4_url
+    if not args.mp4:
+        master = net.get(video.hls_url, headers={"User-Agent": vk.USER_AGENT})
+        source = vk.cheapest_rendition(master, video.hls_url)
+    # Written next to the result first, so an interrupted run never leaves a broken mp3 that looks finished.
+    temporary = main_path + ".part"
+    try:
+        vk.encode_audio(
+            source,
+            temporary,
+            video.duration,
+            _encoding(args),
+            lambda fraction: console.progress("extracting audio", fraction),
+        )
+        os.replace(temporary, main_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+    log.info("saved %s", main_path)
 
 
 def _process(ref: RecordRef, args: argparse.Namespace, cookie_for: api.CookieSource, console: Console) -> None:
@@ -296,7 +348,10 @@ def _clock(seconds: float, decimals: int = 0) -> str:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mtsdump", description="Builds one mp3 from an MTS Link meeting recording.")
     parser.add_argument("--version", action="version", version=f"mtsdump {__version__}")
-    parser.add_argument("records", nargs="+", metavar="url|id", help="record-new link or event session id")
+    parser.add_argument(
+        "records", nargs="+", metavar="url|id",
+        help="record-new link, event session id or vkvideo.ru video link",
+    )
     parser.add_argument("-o", "--output", default=".", metavar="DIR", help="where to save the files (default: current folder)")
     parser.add_argument(
         "--name",

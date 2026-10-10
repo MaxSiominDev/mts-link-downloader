@@ -51,6 +51,13 @@ class FilenameTest(unittest.TestCase):
         self.assertTrue(name.endswith("x.mp3"))
 
 
+class FilenameForTest(unittest.TestCase):
+    def test_matches_filename_of_the_same_record(self):
+        started_at = time.mktime((2026, 9, 10, 12, 19, 8, 0, 0, -1))
+        expected = naming.filename(naming.DEFAULT_TEMPLATE, record("Seminar", started_at))
+        self.assertEqual(naming.filename_for(naming.DEFAULT_TEMPLATE, "7", "Seminar", started_at), expected)
+
+
 class LongNameTest(unittest.TestCase):
     def test_cuts_at_255_characters(self):
         name = naming.filename(naming.DEFAULT_TEMPLATE, record(words(60) + DATE_SUFFIX))

@@ -43,6 +43,24 @@ def get(url: str, headers: dict[str, str] | None = None, cancel: threading.Event
     return _with_retries(url, read, cancel)
 
 
+def post(
+    url: str,
+    data: bytes,
+    headers: dict[str, str] | None = None,
+    opener: urllib.request.OpenerDirector | None = None,
+    cancel: threading.Event | None = None,
+) -> bytes:
+    """Posts data, optionally through an opener that carries a cookie jar across redirects"""
+
+    def read() -> bytes:
+        request = urllib.request.Request(url, data=data, headers=headers or {})
+        urlopen = opener.open if opener else urllib.request.urlopen
+        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return response.read()
+
+    return _with_retries(url, read, cancel)
+
+
 def download(
     url: str,
     path: str,

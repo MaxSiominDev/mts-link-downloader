@@ -21,8 +21,18 @@ def check_template(template: str) -> None:
 
 
 def filename(template: str, record: Record, speaker_label: str | None = None) -> str:
-    title, date = _title_and_date(record)
-    stem = _clean(template.format(date=date, name=title, id=record.session_id)) or str(record.session_id)
+    return filename_for(template, str(record.session_id), record.name, record.started_at, speaker_label)
+
+
+def filename_for(
+    template: str,
+    session_id: str,
+    name: str,
+    started_at: float,
+    speaker_label: str | None = None,
+) -> str:
+    title, date = _title_and_date(name, started_at)
+    stem = _clean(template.format(date=date, name=title, id=session_id)) or str(session_id)
     suffix = f" - {_clean(speaker_label)}" if speaker_label else ""
     return _fit(stem, suffix + EXTENSION)
 
@@ -56,12 +66,12 @@ def _on_disk(label: str) -> str:
     return _clean(label).casefold()
 
 
-def _title_and_date(record: Record) -> tuple[str, str]:
-    match = TRAILING_DATE.search(record.name)
+def _title_and_date(name: str, started_at: float) -> tuple[str, str]:
+    match = TRAILING_DATE.search(name)
     if match:
         day, hours, minutes, seconds = match.groups()
-        return record.name[: match.start()], f"{day} {hours}-{minutes}-{seconds}"
-    return record.name, time.strftime("%Y-%m-%d %H-%M-%S", time.localtime(record.started_at))
+        return name[: match.start()], f"{day} {hours}-{minutes}-{seconds}"
+    return name, time.strftime("%Y-%m-%d %H-%M-%S", time.localtime(started_at))
 
 
 def _clean(text: str) -> str:
