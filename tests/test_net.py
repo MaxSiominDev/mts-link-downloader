@@ -1,4 +1,5 @@
 import errno
+import http.cookiejar
 import http.server
 import os
 import shutil
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.request
 from typing import ClassVar
 from unittest.mock import Mock
 
@@ -146,3 +148,46 @@ class DownloadTest(unittest.TestCase):
         net.download(self.url, self.path, lambda size: None, FakeCancel())
         self.assertEqual(read(self.path), BODY)
         self.assertFalse(os.path.exists(self.path + ".part"))
+
+
+class PostHandler(http.server.BaseHTTPRequestHandler):
+    received: ClassVar[list] = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        PostHandler.received.append(self.rfile.read(length))
+        body = b"posted"
+        self.send_response(200)
+        self.send_header("Set-Cookie", "t=1; Path=/")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class PostTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), PostHandler)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.server.server_port}/token"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        PostHandler.received = []
+
+    def test_posts_the_data_and_returns_the_body(self):
+        self.assertEqual(net.post(self.url, b"a=1"), b"posted")
+        self.assertEqual(PostHandler.received, [b"a=1"])
+
+    def test_an_opener_collects_the_cookies_of_the_answer(self):
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        self.assertEqual(net.post(self.url, b"a=1", opener=opener), b"posted")
+        self.assertEqual([cookie.name for cookie in jar], ["t"])

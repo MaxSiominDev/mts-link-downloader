@@ -5,17 +5,20 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 import mtsdump
-from mtsdump import api, cli, download, hls
+from mtsdump import api, cli, download, ffmpeg, hls, vk
 from tests.support import read, write
 
 SESSION = "22222222222"
 OTHER_SESSION = "33333333333"
 MAIN_FILE = "2026-09-10 08-59-15 Seminar.mp3"
 SPEAKER_FILE = "2026-09-10 08-59-15 Seminar - Lecturer.mp3"
+VK_REF = "https://vkvideo.ru/video111_222?list=ln-key"
+VK_FILE = "2026-09-10 12-19-08 Call.mp3"
 
 
 def namespace(**fields) -> argparse.Namespace:
@@ -67,6 +70,15 @@ def fake_download(sources, work_dir, jobs, on_progress):
 
 def fake_mix(tracks, output_path, encoding, work_dir, on_progress, pad_to=None, normalize_loudness=True):
     write(output_path, b"mp3")
+
+
+def vk_video(mp4=None):
+    started_at = time.mktime((2026, 9, 10, 12, 19, 8, 0, 0, -1))
+    return vk.VkVideo("111_222", "Call", started_at, 100.0, "https://cdn/master.m3u8", mp4)
+
+
+def fake_vk_encode(source, path, duration, encoding, on_progress):
+    write(path, b"mp3")
 
 
 class ProcessTest(unittest.TestCase):
@@ -143,6 +155,101 @@ class ProcessTest(unittest.TestCase):
         self.mix.assert_not_called()
         self.assertFalse(os.path.exists(self.output_path(SPEAKER_FILE)))
         self.assertIn("no sound from Lecturer in the whole record, no track saved", "\n".join(logs.output))
+
+
+class VkProcessTest(unittest.TestCase):
+    def setUp(self):
+        self.output = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.output)
+        self.addCleanup(logging.getLogger().handlers.clear)
+        self.fetch_video = self.start(patch("mtsdump.vk.fetch_video", return_value=vk_video()))
+        self.encode = self.start(patch("mtsdump.vk.encode_audio", side_effect=fake_vk_encode))
+        self.cheapest = self.start(
+            patch("mtsdump.vk.cheapest_rendition", return_value="https://cdn/mobile/track.m3u8")
+        )
+        self.get = self.start(patch("mtsdump.net.get", return_value=b"master"))
+        self.start(patch("mtsdump.ffmpeg.require_tools"))
+
+    def start(self, patcher):
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def run_cli(self, *argv: str) -> int:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return cli.main([*argv, "-o", self.output])
+
+    def output_path(self, name: str) -> str:
+        return os.path.join(self.output, name)
+
+    def test_saves_the_audio_of_the_cheapest_rendition(self):
+        self.assertEqual(self.run_cli(VK_REF), 0)
+        self.assertEqual(read(self.output_path(VK_FILE)), b"mp3")
+        self.assertEqual(self.encode.call_args.args[0], "https://cdn/mobile/track.m3u8")
+        self.assertEqual(self.encode.call_args.args[2], 100.0)
+        self.assertEqual(self.cheapest.call_args.args[1], "https://cdn/master.m3u8")
+
+    def test_existing_file_is_not_rebuilt(self):
+        write(self.output_path(VK_FILE), b"old")
+        self.assertEqual(self.run_cli(VK_REF), 0)
+        self.encode.assert_not_called()
+        self.assertEqual(read(self.output_path(VK_FILE)), b"old")
+
+    def test_list_is_not_supported(self):
+        self.assertEqual(self.run_cli(VK_REF, "--list"), 1)
+        self.fetch_video.assert_not_called()
+        self.encode.assert_not_called()
+
+    def test_mp4_takes_the_audio_from_the_full_mp4(self):
+        self.fetch_video.return_value = vk_video(mp4="https://cdn/full.mp4")
+        self.assertEqual(self.run_cli(VK_REF, "--mp4"), 0)
+        self.assertEqual(self.encode.call_args.args[0], "https://cdn/full.mp4")
+        self.cheapest.assert_not_called()
+
+    def test_mp4_without_an_mp4_file(self):
+        self.assertEqual(self.run_cli(VK_REF, "--mp4"), 1)
+        self.encode.assert_not_called()
+        self.get.assert_not_called()
+
+    def test_a_failed_encode_leaves_no_part_file(self):
+        self.encode.side_effect = ffmpeg.FfmpegError("boom")
+        self.assertEqual(self.run_cli(VK_REF), 1)
+        self.assertFalse([name for name in os.listdir(self.output) if name.endswith(".part")])
+
+    def test_creates_the_output_folder(self):
+        nested = os.path.join(self.output, "new")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main([VK_REF, "-o", nested]), 0)
+        self.assertTrue(os.path.exists(os.path.join(nested, VK_FILE)))
+
+    def test_mts_only_flags_are_ignored(self):
+        self.assertEqual(self.run_cli(VK_REF, "--verify", "--split-speakers", "--keep"), 0)
+        self.assertTrue(os.path.exists(self.output_path(VK_FILE)))
+
+
+class MixedDispatchTest(unittest.TestCase):
+    def setUp(self):
+        self.output = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.output)
+        self.addCleanup(logging.getLogger().handlers.clear)
+        self.start(patch("mtsdump.ffmpeg.require_tools"))
+        self.start(patch("mtsdump.api.fetch_record", side_effect=lambda ref, cookie_for: meta(ref.session_id)))
+        self.start(patch("mtsdump.download.resolve_sources", side_effect=resolve))
+        self.start(patch("mtsdump.download.download_all", side_effect=fake_download))
+        self.start(patch("mtsdump.mix.mix", side_effect=fake_mix))
+        self.start(patch("mtsdump.vk.fetch_video", return_value=vk_video()))
+        self.start(patch("mtsdump.vk.cheapest_rendition", return_value="https://cdn/mobile/track.m3u8"))
+        self.start(patch("mtsdump.vk.encode_audio", side_effect=fake_vk_encode))
+        self.start(patch("mtsdump.net.get", return_value=b"master"))
+
+    def start(self, patcher):
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def test_one_run_handles_an_mts_record_and_a_vk_video(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main([SESSION, VK_REF, "-o", self.output]), 0)
+        self.assertTrue(os.path.exists(os.path.join(self.output, MAIN_FILE)))
+        self.assertTrue(os.path.exists(os.path.join(self.output, VK_FILE)))
 
 
 class CookieSourceTest(unittest.TestCase):
