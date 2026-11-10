@@ -7,6 +7,7 @@ from mtsdump.record import Record, Speaker
 
 DEFAULT_TEMPLATE = "{date} {name}"
 EXTENSION = ".mp3"
+VIDEO_EXTENSION = ".mp4"
 NAME_MAX = 255
 TRAILING_DATE = re.compile(r"\s*(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):(\d{2})\s*$")
 UNSAFE_CHARACTERS = str.maketrans({"/": "-", ":": "-", "\0": None})
@@ -20,8 +21,8 @@ def check_template(template: str) -> None:
         raise ValueError(f"--name {template!r}: only {{date}}, {{name}} and {{id}} are supported") from error
 
 
-def filename(template: str, record: Record, speaker_label: str | None = None) -> str:
-    return filename_for(template, str(record.session_id), record.name, record.started_at, speaker_label)
+def filename(template: str, record: Record, speaker_label: str | None = None, extension: str = EXTENSION) -> str:
+    return filename_for(template, str(record.session_id), record.name, record.started_at, speaker_label, extension)
 
 
 def filename_for(
@@ -30,11 +31,12 @@ def filename_for(
     name: str,
     started_at: float,
     speaker_label: str | None = None,
+    extension: str = EXTENSION,
 ) -> str:
     title, date = _title_and_date(name, started_at)
     stem = _clean(template.format(date=date, name=title, id=session_id)) or str(session_id)
     suffix = f" - {_clean(speaker_label)}" if speaker_label else ""
-    return _fit(stem, suffix + EXTENSION)
+    return _fit(stem, suffix, extension)
 
 
 def speaker_labels(speakers: Iterable[Speaker | None]) -> dict[Speaker | None, str]:
@@ -78,14 +80,14 @@ def _clean(text: str) -> str:
     return " ".join(text.translate(UNSAFE_CHARACTERS).split()).lstrip(". ")
 
 
-def _fit(stem: str, suffix: str) -> str:
-    while stem and not _fits(stem + suffix):
+def _fit(stem: str, suffix: str, extension: str) -> str:
+    while stem and not _fits(stem + suffix + extension):
         cut = stem.rfind(" ")
         shorter = stem[:cut].rstrip(" ,.-") if cut > 0 else ""
         stem = shorter or stem[:-1]
-    name = stem + suffix
+    name = stem + suffix + extension
     while not _fits(name):
-        name = name[: -len(EXTENSION) - 1] + EXTENSION
+        name = name[: -len(extension) - 1] + extension
     return name
 
 

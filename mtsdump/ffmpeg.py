@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -74,6 +75,11 @@ def has_audio(target: str) -> bool:
     return "audio" in _probe(*remote, "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", target)
 
 
+def has_video(target: str) -> bool:
+    remote = REMOTE_OPTIONS if target.startswith(("http://", "https://")) else ()
+    return "video" in _probe(*remote, "-select_streams", "v", "-show_entries", "stream=codec_type", "-of", "csv=p=0", target)
+
+
 def analyze(path: str, filters: str) -> str:
     """Runs report-only filters such as volumedetect and returns ffmpeg's stderr."""
     result = subprocess.run(
@@ -85,6 +91,27 @@ def analyze(path: str, filters: str) -> str:
     if result.returncode != 0:
         raise FfmpegError(result.stderr.strip()[-ERROR_TAIL_CHARS:])
     return result.stderr
+
+
+BLACK_LINE = re.compile(r"black_start:(\d+(?:\.\d+)?) black_end:(\d+(?:\.\d+)?)")
+
+
+def black_windows(target: str) -> list[tuple[float, float]]:
+    """Runs blackdetect and returns the spans of the video that are fully black, in file time.
+
+    A static camera kept on without a picture is recorded as such a span. Sub-second black gaps are
+    not reported and are shown as they are.
+    """
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-i", target, "-map", "0:v:0",
+         "-vf", "blackdetect=d=1:pix_th=0.10", "-f", "null", "-"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise FfmpegError(result.stderr.strip()[-ERROR_TAIL_CHARS:])
+    return [(float(match.group(1)), float(match.group(2))) for match in BLACK_LINE.finditer(result.stderr)]
 
 
 def _probe(*args: str) -> str:

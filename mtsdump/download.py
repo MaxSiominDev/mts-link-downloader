@@ -4,7 +4,7 @@ import os
 import shutil
 import threading
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
@@ -91,6 +91,41 @@ def _stop(pool: ThreadPoolExecutor, cancel: threading.Event) -> None:
     # Running requests notice the event at their next retry or chunk, queued ones never start.
     cancel.set()
     pool.shutdown(cancel_futures=True)
+
+
+def download_mp4s(
+    streams: Iterable[Stream], work_dir: str, jobs: int, on_progress: Callable[[int, int, int], None]
+) -> dict[int, str]:
+    """Downloads the full mp4 of every stream into work_dir, reusing what an earlier run left there"""
+    cancel = threading.Event()
+    sizes = _SizeCounter()
+    missing = [stream for stream in streams if not os.path.exists(_mp4_target(stream, work_dir))]
+    with ThreadPoolExecutor(jobs) as pool:
+        try:
+            owners = {}
+            for stream in missing:
+                target = _mp4_target(stream, work_dir)
+                owners[pool.submit(
+                    functools.partial(net.download, stream.url, target, functools.partial(sizes.set, target), cancel)
+                )] = stream
+            pending = set(owners)
+            while pending:
+                done, pending = wait(pending, timeout=PROGRESS_INTERVAL_SECONDS, return_when=FIRST_COMPLETED)
+                for future in done:
+                    stream = owners[future]
+                    try:
+                        future.result()
+                    except (net.HttpStatusError, net.NetworkError) as error:
+                        raise DownloadError(f"stream {stream.id}: {error}") from error
+                on_progress(len(owners) - len(pending), len(owners), sizes.total())
+        except BaseException:
+            _stop(pool, cancel)
+            raise
+    return {stream.id: _mp4_target(stream, work_dir) for stream in streams}
+
+
+def _mp4_target(stream: Stream, work_dir: str) -> str:
+    return os.path.join(work_dir, f"{stream.id}.mp4")
 
 
 def _resolve(stream: Stream, prefer_mp4: bool, cancel: threading.Event) -> Source | None:
