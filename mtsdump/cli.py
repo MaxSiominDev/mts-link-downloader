@@ -9,11 +9,11 @@ import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from mtsdump import __version__, api, download, ffmpeg, mix, naming, net, verify, vk
+from mtsdump import __version__, api, download, ffmpeg, mix, naming, net, verify, video, vk
 from mtsdump.console import Console, ConsoleHandler
 from mtsdump.cookies import CookieError, chrome_cookie_header
 from mtsdump.links import RecordRef, VkVideoRef, parse_record_ref, parse_vk_video_ref
-from mtsdump.record import Record, RecordFormatError, Speaker, parse_record
+from mtsdump.record import Record, RecordFormatError, Speaker, Stream, parse_record
 
 DEFAULT_JOBS = 6
 LISTENING = mix.Encoding(sample_rate=48000, bitrate="64k", highpass=False)
@@ -94,6 +94,8 @@ def _ref(value: str) -> RecordRef | VkVideoRef:
 def _process_vk(ref: VkVideoRef, args: argparse.Namespace, cookie_for: api.CookieSource, console: Console) -> None:
     if args.list:
         raise vk.ApiError("--list is not supported for VK links")
+    if args.video:
+        raise vk.ApiError("--video is not supported for VK links")
     video = vk.fetch_video(ref, cookie_for)
     log.info("%s: %s", video.session_id, video.title)
     output_dir = os.path.expanduser(args.output)
@@ -133,7 +135,14 @@ def _process(ref: RecordRef, args: argparse.Namespace, cookie_for: api.CookieSou
     log.info("%s: %s", record.session_id, record.name)
     output_dir = os.path.expanduser(args.output)
     main_path = os.path.join(output_dir, naming.filename(args.name, record))
-    if os.path.exists(main_path) and not (args.list or args.split_speakers):
+    video_path = ""
+    if args.video:
+        video_path = os.path.join(output_dir, naming.filename(args.name, record, extension=naming.VIDEO_EXTENSION))
+    if (
+        os.path.exists(main_path)
+        and not (args.list or args.split_speakers)
+        and (not video_path or os.path.exists(video_path))
+    ):
         log.info("already saved: %s", main_path)
         return
     if record.has_cuts:
@@ -141,22 +150,23 @@ def _process(ref: RecordRef, args: argparse.Namespace, cookie_for: api.CookieSou
                     "so timing drifts from the player after the first cut")
     if record.has_converted_records:
         log.warning("the record has a converted file, it is not used and the mix is built from the streams")
-    sources = download.resolve_sources(record.streams, prefer_mp4=args.mp4, jobs=args.jobs)
+    sources = download.resolve_sources(record.streams, prefer_mp4=args.mp4 or args.video, jobs=args.jobs)
     audio = [source for source in sources if source is not None]
     log.info("%d streams, %d with audio, %d without", len(sources), len(audio), len(sources) - len(audio))
     _warn_if_sparse(record, audio)
     if args.list:
         _print_streams(record, sources)
-    elif not audio:
+    elif not audio and not args.video:
         raise download.DownloadError("no stream has audio")
     else:
-        _build(record, audio, main_path, output_dir, args, console)
+        _build(record, audio, main_path, video_path, output_dir, args, console)
 
 
 def _build(
     record: Record,
     audio: list[download.Source],
     main_path: str,
+    video_path: str,
     output_dir: str,
     args: argparse.Namespace,
     console: Console,
@@ -164,39 +174,46 @@ def _build(
     speaker_tracks = _speaker_tracks(args.name, record, audio, output_dir) if args.split_speakers else []
     missing_tracks = [track for track in speaker_tracks if not os.path.exists(track.path)]
     main_missing = not os.path.exists(main_path)
-    if not main_missing and not missing_tracks:
-        log.info("the mix and every speaker track are already saved")
+    video_missing = bool(video_path) and not os.path.exists(video_path)
+    if not main_missing and not missing_tracks and not video_missing:
+        log.info("the mix, the video and every speaker track are already saved")
         return
     work_dir = os.path.join(output_dir, f"{record.session_id}.parts")
     os.makedirs(work_dir, exist_ok=True)
-    files = download.download_all(audio, work_dir, args.jobs, functools.partial(_show_download, console))
-    console.end_progress()
-    log.info("downloaded %d streams, %.0f MB", len(files), sum(os.path.getsize(file.path) for file in files) / 1e6)
-
-    encoding = _encoding(args)
-    length = max(file.stream.start + file.duration for file in files)
-    log.info("mix length %s, session length %s", _clock(length), _clock(record.duration))
+    files = []
     saved = []
-    if main_missing:
-        _mix(files, main_path, encoding, work_dir, console)
-        saved.append(main_path)
-    for track in missing_tracks:
-        own_files = [file for file in files if file.stream.speaker == track.speaker]
-        if _all_silent(own_files, args.jobs):
-            log.info("no sound from %s in the whole record, no track saved", track.label)
-            continue
-        _mix(
-            own_files,
-            track.path,
-            encoding,
-            work_dir,
-            console,
-            label=track.label,
-            pad_to=length,
-            normalize_loudness=False,
-        )
-        saved.append(track.path)
-    if args.verify:
+    if audio:
+        files = download.download_all(audio, work_dir, args.jobs, functools.partial(_show_download, console))
+        console.end_progress()
+        log.info("downloaded %d streams, %.0f MB", len(files), sum(os.path.getsize(file.path) for file in files) / 1e6)
+        encoding = _encoding(args)
+        length = max(file.stream.start + file.duration for file in files)
+        log.info("mix length %s, session length %s", _clock(length), _clock(record.duration))
+        if main_missing:
+            _mix(files, main_path, encoding, work_dir, console)
+            saved.append(main_path)
+        for track in missing_tracks:
+            own_files = [file for file in files if file.stream.speaker == track.speaker]
+            if _all_silent(own_files, args.jobs):
+                log.info("no sound from %s in the whole record, no track saved", track.label)
+                continue
+            _mix(
+                own_files,
+                track.path,
+                encoding,
+                work_dir,
+                console,
+                label=track.label,
+                pad_to=length,
+                normalize_loudness=False,
+            )
+            saved.append(track.path)
+    elif main_missing:
+        log.warning("no stream has audio, the mp3 is not built and the video comes out silent")
+    if video_missing:
+        _video(record, files, main_path if os.path.exists(main_path) else None, video_path, work_dir, args, console)
+        saved.append(video_path)
+    if args.verify and files:
         _log_report(verify.verify(main_path, files, args.jobs))
     if args.keep:
         log.info("sources kept in %s", work_dir)
@@ -204,6 +221,48 @@ def _build(
         shutil.rmtree(work_dir)
     for path in saved:
         log.info("saved %s", path)
+
+
+def _video(
+    record: Record,
+    files: list[download.AudioFile],
+    main_path: str | None,
+    video_path: str,
+    work_dir: str,
+    args: argparse.Namespace,
+    console: Console,
+) -> None:
+    paths = {file.stream.id: file.path for file in files}
+    silent = [stream for stream in record.streams if stream.id not in paths]
+    if silent:
+        paths.update(download.download_mp4s(silent, work_dir, args.jobs, functools.partial(_show_download, console)))
+        console.end_progress()
+    cameras: dict[Speaker, list[Stream]] = {}
+    shares = []
+    video_paths = {}
+    for stream in record.streams:
+        if not ffmpeg.has_video(paths[stream.id]):
+            continue
+        video_paths[stream.id] = paths[stream.id]
+        if stream.speaker is None:
+            shares.append(stream)
+        else:
+            cameras.setdefault(stream.speaker, []).append(stream)
+    black = video.scan_black(video_paths, args.jobs, functools.partial(_show_scan, console))
+    console.end_progress()
+    plan = video.plan(record.duration, cameras, shares, black)
+    if not plan.intervals:
+        raise download.DownloadError("no stream has video")
+    for warning in plan.warnings:
+        log.warning("%s", warning)
+    video.render(
+        plan,
+        paths,
+        main_path,
+        video_path,
+        work_dir,
+        lambda fraction: console.progress("rendering video", fraction),
+    )
 
 
 def _speaker_tracks(template: str, record: Record, audio: list[download.Source], output_dir: str) -> list[SpeakerTrack]:
@@ -247,6 +306,10 @@ def _all_silent(files: list[download.AudioFile], jobs: int) -> bool:
 
 def _show_download(console: Console, done: int, total: int, size: int) -> None:
     console.progress("downloading", done / total, f"{done}/{total} parts, {size / 1e6:.0f} MB")
+
+
+def _show_scan(console: Console, done: int, total: int) -> None:
+    console.progress("scanning cameras", done / total, f"{done}/{total} streams")
 
 
 def _warn_if_sparse(record: Record, audio: list[download.Source]) -> None:
@@ -363,6 +426,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--asr", action="store_true", help="16 kHz mono with a 70 Hz high-pass, for speech recognition")
     parser.add_argument("--keep", action="store_true", help="keep the downloaded streams in DIR/<id>.parts")
     parser.add_argument("--mp4", action="store_true", help="take the audio from the full mp4 files instead of HLS")
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        help="also build an mp4 of the record: screen share large, participant cameras in a grid",
+    )
     cookies = parser.add_mutually_exclusive_group()
     cookies.add_argument("--cookie", metavar="STR", help="Cookie header copied from the browser devtools")
     cookies.add_argument(

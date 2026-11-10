@@ -16,6 +16,7 @@ from tests.support import read, write
 SESSION = "22222222222"
 OTHER_SESSION = "33333333333"
 MAIN_FILE = "2026-09-10 08-59-15 Seminar.mp3"
+VIDEO_FILE = "2026-09-10 08-59-15 Seminar.mp4"
 SPEAKER_FILE = "2026-09-10 08-59-15 Seminar - Lecturer.mp3"
 VK_REF = "https://vkvideo.ru/video111_222?list=ln-key"
 VK_FILE = "2026-09-10 12-19-08 Call.mp3"
@@ -70,6 +71,19 @@ def fake_download(sources, work_dir, jobs, on_progress):
 
 def fake_mix(tracks, output_path, encoding, work_dir, on_progress, pad_to=None, normalize_loudness=True):
     write(output_path, b"mp3")
+
+
+def fake_download_mp4s(streams, work_dir, jobs, on_progress):
+    paths = {}
+    for stream in streams:
+        path = os.path.join(work_dir, f"{stream.id}.mp4")
+        write(path, b"mp4")
+        paths[stream.id] = path
+    return paths
+
+
+def fake_render(plan, paths, audio_path, output_path, work_dir, on_progress):
+    write(output_path, b"video")
 
 
 def vk_video(mp4=None):
@@ -157,6 +171,76 @@ class ProcessTest(unittest.TestCase):
         self.assertIn("no sound from Lecturer in the whole record, no track saved", "\n".join(logs.output))
 
 
+class VideoProcessTest(unittest.TestCase):
+    def setUp(self):
+        self.output = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.output)
+        self.addCleanup(logging.getLogger().handlers.clear)
+        self.start(patch("mtsdump.api.fetch_record", side_effect=lambda ref, cookie_for: meta(ref.session_id)))
+        self.render = self.start(patch("mtsdump.video.render", side_effect=fake_render))
+        self.resolve_sources = self.start(patch("mtsdump.download.resolve_sources", side_effect=resolve))
+        self.start(patch("mtsdump.download.download_all", side_effect=fake_download))
+        self.start(patch("mtsdump.download.download_mp4s", side_effect=fake_download_mp4s))
+        self.scan_black = self.start(patch("mtsdump.video.scan_black", return_value={}))
+        self.mix = self.start(patch("mtsdump.mix.mix", side_effect=fake_mix))
+        self.start(patch("mtsdump.ffmpeg.has_video", return_value=True))
+        self.start(patch("mtsdump.ffmpeg.require_tools"))
+
+    def start(self, patcher):
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def run_cli(self, *argv: str) -> int:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return cli.main([*argv, "-o", self.output])
+
+    def output_path(self, name: str) -> str:
+        return os.path.join(self.output, name)
+
+    def test_builds_the_video_alongside_the_mix(self):
+        self.assertEqual(self.run_cli(SESSION, "--video"), 0)
+        self.assertEqual(read(self.output_path(MAIN_FILE)), b"mp3")
+        self.assertEqual(read(self.output_path(VIDEO_FILE)), b"video")
+
+    def test_an_existing_mp3_is_kept_and_only_the_video_is_built(self):
+        write(self.output_path(MAIN_FILE), b"old")
+        self.assertEqual(self.run_cli(SESSION, "--video"), 0)
+        self.mix.assert_not_called()
+        self.assertEqual(read(self.output_path(MAIN_FILE)), b"old")
+        self.assertEqual(read(self.output_path(VIDEO_FILE)), b"video")
+
+    def test_an_existing_video_is_not_rebuilt(self):
+        self.assertEqual(self.run_cli(SESSION, "--video"), 0)
+        self.render.reset_mock()
+        self.assertEqual(self.run_cli(SESSION, "--video"), 0)
+        self.render.assert_not_called()
+
+    def test_video_takes_the_audio_from_the_full_mp4_files(self):
+        self.run_cli(SESSION, "--video")
+        self.assertEqual(self.resolve_sources.call_args.kwargs["prefer_mp4"], True)
+
+    def test_a_session_without_audio_builds_a_silent_video(self):
+        self.resolve_sources.side_effect = lambda streams, prefer_mp4, jobs: []
+        with self.assertLogs("mtsdump", "WARNING") as logs:
+            self.assertEqual(self.run_cli(SESSION, "--video"), 0)
+        self.assertIn("no stream has audio", "\n".join(logs.output))
+        self.assertFalse(os.path.exists(self.output_path(MAIN_FILE)))
+        self.assertEqual(read(self.output_path(VIDEO_FILE)), b"video")
+        self.assertIsNone(self.render.call_args.args[2])
+
+    def test_black_cameras_do_not_occupy_the_grid(self):
+        self.scan_black.return_value = {101: [(0.0, 100.0)]}
+        self.assertEqual(self.run_cli(SESSION, "--video"), 0)
+        (plan,) = self.render.call_args.args[:1]
+        self.assertEqual(plan.intervals[0].tiles, ())
+
+    def test_no_stream_with_video(self):
+        self.start(patch("mtsdump.ffmpeg.has_video", return_value=False))
+        with self.assertLogs("mtsdump", "ERROR") as logs:
+            self.assertEqual(self.run_cli(SESSION, "--video"), 1)
+        self.assertIn("no stream has video", "\n".join(logs.output))
+
+
 class VkProcessTest(unittest.TestCase):
     def setUp(self):
         self.output = tempfile.mkdtemp()
@@ -196,6 +280,11 @@ class VkProcessTest(unittest.TestCase):
 
     def test_list_is_not_supported(self):
         self.assertEqual(self.run_cli(VK_REF, "--list"), 1)
+        self.fetch_video.assert_not_called()
+        self.encode.assert_not_called()
+
+    def test_video_is_not_supported(self):
+        self.assertEqual(self.run_cli(VK_REF, "--video"), 1)
         self.fetch_video.assert_not_called()
         self.encode.assert_not_called()
 

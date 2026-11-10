@@ -45,6 +45,10 @@ class FilenameTest(unittest.TestCase):
     def test_empty_name_falls_back_to_the_session_id(self):
         self.assertEqual(naming.filename("{name}", record("")), "7.mp3")
 
+    def test_video_extension(self):
+        name = naming.filename(naming.DEFAULT_TEMPLATE, record("Seminar" + DATE_SUFFIX), extension=naming.VIDEO_EXTENSION)
+        self.assertEqual(name, DATE_PREFIX + "Seminar.mp4")
+
     def test_cut_never_leaves_a_hidden_file(self):
         name = naming.filename("{name}", record("- " + "x" * 300))
         self.assertTrue(name.startswith("- x"))

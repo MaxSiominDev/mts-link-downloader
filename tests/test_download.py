@@ -157,3 +157,43 @@ class DownloadAllTest(unittest.TestCase):
         (file,) = self.run_download([source])
         self.assertEqual(file.path, os.path.join(self.work_dir, "8.mp4"))
         self.assertEqual(download_file.call_args.args[:2], ("https://storage/8.mp4", file.path))
+
+
+class DownloadMp4sTest(unittest.TestCase):
+    def setUp(self):
+        self.work_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work_dir)
+
+    def run_download(self, streams, jobs=3):
+        return download.download_mp4s(streams, self.work_dir, jobs=jobs, on_progress=lambda done, total, size: None)
+
+    @patch("mtsdump.download.net.download")
+    def test_downloads_the_full_mp4_of_every_stream(self, download_file):
+        download_file.side_effect = lambda url, path, on_progress, cancel: write(path, b"mp4")
+        streams = (
+            Stream(1, 0.0, 5.0, "https://storage/1.mp4", None, None),
+            Stream(2, 0.0, 5.0, "https://storage/2.mp4", None, None),
+        )
+        paths = self.run_download(streams)
+        self.assertEqual(paths, {
+            1: os.path.join(self.work_dir, "1.mp4"),
+            2: os.path.join(self.work_dir, "2.mp4"),
+        })
+        self.assertEqual(sorted(call.args[0] for call in download_file.call_args_list),
+                         ["https://storage/1.mp4", "https://storage/2.mp4"])
+
+    @patch("mtsdump.download.net.download")
+    def test_reuses_files_of_an_earlier_run(self, download_file):
+        write(os.path.join(self.work_dir, "1.mp4"), b"kept")
+        (paths,) = self.run_download((Stream(1, 0.0, 5.0, "https://storage/1.mp4", None, None),)).values()
+        download_file.assert_not_called()
+        self.assertEqual(read(paths), b"kept")
+
+    @patch("mtsdump.download.net.download")
+    def test_names_the_stream_that_failed(self, download_file):
+        def fail(url, path, on_progress, cancel):
+            raise net.HttpStatusError(url, 404)
+
+        download_file.side_effect = fail
+        with self.assertRaisesRegex(download.DownloadError, "stream 1"):
+            self.run_download((Stream(1, 0.0, 5.0, "https://storage/1.mp4", None, None),))

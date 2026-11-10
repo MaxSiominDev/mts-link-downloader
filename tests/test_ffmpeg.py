@@ -51,3 +51,17 @@ class FfmpegTest(unittest.TestCase):
         missing = os.path.join(self.directory, "missing.m4a")
         with self.assertRaisesRegex(ffmpeg.FfmpegError, "No such file"):
             ffmpeg.run(["-i", missing, "-f", "null", "-"], 1.0, lambda fraction: None)
+
+    def test_black_windows_reports_the_black_spans(self):
+        path = os.path.join(self.directory, "half_black.mp4")
+        subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-f", "lavfi", "-i", "color=black:size=64x64:duration=3",
+                "-f", "lavfi", "-i", "testsrc2=size=64x64:duration=3",
+                "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]",
+                "-map", "[v]", "-c:v", "mpeg4", path,
+            ],
+            check=True,
+        )
+        self.assertEqual(ffmpeg.black_windows(path), [(0.0, 3.0)])

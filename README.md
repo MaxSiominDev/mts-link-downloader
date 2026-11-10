@@ -139,6 +139,7 @@ quirks of the delivery hosts.
 | `--list` | print the streams and exit |
 | `--keep` | keep the downloaded streams in `DIR/<id>.parts` |
 | `--mp4` | take the audio from the full mp4 files instead of HLS |
+| `--video` | build an mp4 of the record |
 | `--cookie STR` | `Cookie` header copied from the browser |
 | `--cookies-from-browser chrome[:PROFILE]` | read the cookies of the local Chrome profile |
 | `-j`, `--jobs N` | parallel downloads, default 6 |
@@ -180,13 +181,19 @@ listed separately, and with `--split-speakers` no track is written for them.
 - Cookies are read from Chrome. With any other browser, copy the header and use `--cookie`.
 - Only `/record-new/` links are parsed, older recording URLs are not. VK is reached only through
   `vkvideo.ru/video<owner>_<id>` links, other VK URL forms are not parsed.
-- VK recordings come out as audio only, one rendition, no `--verify` report.
+- VK recordings come out as audio only, one rendition, no `--verify` report, and `--video` is not supported for them.
 - A recording that was cut in the MTS Link editor is assembled whole: the cut parts come back and the timing stops
   matching the player after the first cut. `mtsdump` warns when it sees this.
 - A few streams in a large meeting have a playlist that cannot be joined into a single file (two initialization
   sections after a discontinuity). Their audio is taken from the full mp4 instead, which costs extra traffic. The log
   says which streams these were.
-- Only audio for now. The video of every stream stays on the server.
+- The web player decides the layout on the client and the exact arrangement cannot be recovered, so `--video` builds
+  its own approximation of it: screen share large with the cameras in a strip of 10 tiles below, or a grid of all
+  cameras up to 5 by 5 on a 1280x720 canvas. Extra participants are hidden, the log says how many.
+- A camera between two of its streams is held as a frozen frame when the gap is under 5 seconds, which covers
+  reconnects; a longer gap turns the tile off. A camera that is left on with nobody in front of it is recorded as
+  black video by MTS Link; such spans are found with `blackdetect` and the tile does not occupy the layout.
+  `--verify` checks the mix, not the video.
 
 ## Exit codes
 
